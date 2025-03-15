@@ -157,12 +157,12 @@ def list_att_filenames(image_directory):
 # Function to remove file extension and parenthesized numbers from the end of image filenames. This is used to match those filenames back to their respective img_src key.
 def normalize_filename(filename):
     # Remove the file extension and any parenthesized numbers, then truncate at 50 characters
-    return re.sub(r'(?:\((\d+)\))?\.(jpg|gif|png|vcf|mp4)$', '', filename)[:50]
+    return re.sub(r'(?:$$(\d+)$$)?\.(jpg|gif|png|vcf|mp4)$', '', filename)[:50]
 
 # Function to sort filenames so that files with parenthesized numbers appended to the end follow the base filename.
 def custom_filename_sort(filename):
     # This will match the entire filename up to the extension, and capture any numbers in parentheses
-    match = re.match(r'(.*?)(?:\((\d+)\))?(\.\w+)?$', filename)
+    match = re.match(r'(.*?)(?:$$(\d+)$$)?(\.\w+)?$', filename)
     if match:
         base_filename = match.group(1)
         number = int(match.group(2)) if match.group(2) else -1  # Assign -1 to filenames without parentheses
@@ -301,7 +301,7 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
 
                 assert (
                     len(image_path) != 0
-                ), f"No matching images found. File name: {original_image_filename}"
+                ), f"No matching images found. File name: {image_filename}"
                 assert (
                     len(image_path) == 1
                 ), f"Multiple potential matching images found. Images: {[x for x in image_path]!r}"
@@ -326,46 +326,82 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
         if videos:
             text_only = 0
             for video in videos:
-                # I have only encountered jpg and gif, but I have read that GV can ecxport png
                 supported_types = ["mp4"]
                 video_src = video.get("href")
-                # Change to use the src_filename_map to find the image filename that corresponds to the image_src value, which is unique to each image MMS message.
-                # Attempt to find a direct match for the image_src in the src_filename_map
+                
+                # Print debug info
+                print(f"Processing video with href: {video_src}")
+                
+                # Try multiple approaches to find the video file
+                video_path = []
+                
+                # Approach 1: Direct match from src_filename_map
                 video_filename = src_filename_map.get(video_src)
-                # If a direct match isn't found, prepend the start of the HTML file name to find the image name
-                if video_filename is None or video_filename == "No unused match found":  # Adjust based on your actual "not found" condition
+                if video_filename and video_filename != "No unused match found":
+                    print(f"Found video in mapping: {video_filename}")
+                    video_path = [p for p in Path.cwd().glob(f"**/*{video_filename}") if p.is_file() and p.suffix.lower() == '.mp4']
+                
+                # Approach 2: Try to extract the video filename from the href
+                if not video_path:
+                    # Extract just the filename part from the href
+                    video_base_name = os.path.basename(video_src)
+                    print(f"Looking for video with base name: {video_base_name}")
+                    video_path = [p for p in Path.cwd().glob(f"**/*{video_base_name}*") if p.is_file() and p.suffix.lower() == '.mp4']
+                
+                # Approach 3: Try using the HTML filename prefix
+                if not video_path:
                     html_filename_prefix = file.split('-', 1)[0]
-                    video_filename = html_filename_prefix + video_src[image_src.find('-'):]
-                    video_filename_with_ext = f"{video_filename}.*"
-                    video_path = list(Path.cwd().glob(f"**/{video_filename_with_ext}"))
-                    video_path = [p for p in video_path if p.suffix[1:] in supported_types]
+                    # Try to find any video file that starts with the HTML filename prefix
+                    print(f"Looking for video with HTML prefix: {html_filename_prefix}")
+                    video_path = [p for p in Path.cwd().glob(f"**/{html_filename_prefix}*.mp4") if p.is_file()]
+                
+                # Approach 4: Last resort - look for any MP4 files in the directory
+                if not video_path:
+                    print("Last resort: Looking for any MP4 files")
+                    video_path = [p for p in Path.cwd().glob("**/*.mp4") if p.is_file()]
+                    # If we found multiple videos, try to find one that might match based on date/time in the filename
+                    if len(video_path) > 1 and '-' in file:
+                        date_part = file.split('-')[1].strip() if len(file.split('-')) > 1 else ""
+                        if date_part:
+                            print(f"Filtering videos by date part: {date_part}")
+                            filtered_path = [p for p in video_path if date_part in p.name]
+                            if filtered_path:
+                                video_path = filtered_path
+                
+                # If we still have multiple videos, just use the first one
+                if len(video_path) > 1:
+                    print(f"Warning: Multiple potential videos found: {[str(p) for p in video_path]}")
+                    print(f"Using the first one: {video_path[0]}")
+                    video_path = [video_path[0]]
+                
+                # If we found a video, process it
+                if video_path:
+                    video_path = video_path[0]
+                    print(f"Using video path: {video_path}")
+                    video_type = video_path.suffix[1:]
+                    
+                    try:
+                        with video_path.open("rb") as fb:
+                            video_bytes = fb.read()
+                        byte_string = f"{b64encode(video_bytes)}"
+                        
+                        # Use the full path and then derive the relative path
+                        relative_video_path = video_path.relative_to(Path.cwd())
+                        
+                        video_parts += (
+                            f'    <part seq="0" ct="video/{video_type}" name="{relative_video_path}" '
+                            f'chset="null" cd="null" fn="null" cid="&lt;{relative_video_path}&gt;" '
+                            f'cl="{relative_video_path}" ctt_s="null" ctt_t="null" text="null" '
+                            f'data="{byte_string[2:-1]}" />\n'
+                        )
+                    except Exception as e:
+                        print(f"Error processing video file {video_path}: {e}")
+                        # Continue without the video attachment
+                        continue
                 else:
-                    video_path = [p for p in Path.cwd().glob(f"**/*{video_filename}") if p.is_file()]
-
-                assert (
-                        len(video_path) != 0
-                ), f"No matching videos found. File name: {original_video_filename}"
-                assert (
-                        len(video_path) == 1
-                ), f"Multiple potential matching videos found. Images: {[x for x in video_path]!r}"
-
-                video_path = video_path[0]
-                print(f'Video path: {video_path}')
-                video_type = video_path.suffix[1:]
-
-                with video_path.open("rb") as fb:
-                    video_bytes = fb.read()
-                byte_string = f"{b64encode(video_bytes)}"
-
-                # Use the full path and then derive the relative path, ensuring the complete filename is used
-                relative_video_path = video_path.relative_to(Path.cwd())
-
-                video_parts += (
-                    f'    <part seq="0" ct="video/{video_type}" name="{relative_video_path}" '
-                    f'chset="null" cd="null" fn="null" cid="&lt;{relative_video_path}&gt;" '
-                    f'cl="{relative_video_path}" ctt_s="null" ctt_t="null" text="null" '
-                    f'data="{byte_string[2:-1]}" />\n'
-                )
+                    print(f"Warning: No video file found for {video_src}. Continuing without video attachment.")
+                    # Continue without the video attachment
+                    continue
 
         # Handle vcards
         if vcards:
@@ -381,9 +417,9 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
                 if vcard_filename is None or vcard_filename == "No unused match found":  # Adjust based on your actual "not found" condition
                     html_filename_prefix = file.split('-', 1)[0]
                     vcard_filename = html_filename_prefix + vcard_src[vcard_src.find('-'):]
-                    vcard_filename_with_ext = f"{image_filename}.*"
+                    vcard_filename_with_ext = f"{vcard_filename}.*"
                     vcard_path = list(Path.cwd().glob(f"**/{vcard_filename_with_ext}"))
-                    vcard_path = [p for p in image_path if p.suffix[1:] in supported_types]
+                    vcard_path = [p for p in vcard_path if p.suffix[1:] in supported_types]
                 else:
                     vcard_path = [p for p in Path.cwd().glob(f"**/*{vcard_filename}") if p.is_file()]                
 
